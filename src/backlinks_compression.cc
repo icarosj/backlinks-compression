@@ -36,6 +36,11 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <math.h>
+
+float g_scale = 1.2;
+float g_gamma_r=0.6;
+float g_gamma_meanmod=0.5;
 
 //
 // BitString
@@ -60,45 +65,6 @@ bool BitString::Output(const char *filename) {
   }
   return ofs.good();
 }
-
-//
-// DeltaCode
-//
-void DeltaCode::EncodeInt(int val, BitString *out) {
-  out->Init(0);
-  int length_val = CountBitLength(val + 1) - 1;
-  int length_length_val = CountBitLength(length_val + 1) - 1;
-  for (int i = 0; i < length_length_val; ++i) out->AppendBit(0);
-  out->AppendBit(1);
-  for (int i = length_length_val - 1; i >= 0; --i) {
-    out->AppendBit((length_val + 1) >> i & 1);
-  }
-  for (int i = length_val - 1; i >= 0; --i) {
-    out->AppendBit((val + 1) >> i & 1);
-  }
-}
-
-int DeltaCode::DecodeNextInt(const BitString &in, uint64_t *i) {
-    int length_length_val = 0;
-    while (!in.GetBit(*i)){
-      ++length_length_val;
-      ++(*i);
-    }
-    ++(*i);
-    int length_val = 1;
-    for(int j = 0; j < length_length_val; ++j) {
-      length_val = (length_val << 1) | in.GetBit(*i);
-      ++(*i);
-    }
-    --length_val;
-    int val = 1;
-    for(int j = 0; j < length_val; ++j) {
-      val = (val << 1) | in.GetBit(*i);
-      ++(*i);
-    }
-    return val - 1;
-}
-
 //
 // BacklinksCompression
 //
@@ -134,7 +100,7 @@ void BacklinksCompression
 }
 
 void BacklinksCompression
-::Compress(std::vector<std::pair<int, int> > edges, BitString *result) {
+::Compress(std::vector<std::pair<int, int> > edges, ENCODING encoding, BitString *result) {
   std::vector<int> order;
   Order(edges, &order);
   for (uint64_t i = 0; i < edges.size(); ++i) {
@@ -144,7 +110,7 @@ void BacklinksCompression
   std::vector<std::vector<int> > adj;
   TransformToAdj(edges, true, &adj);
   int num_v = adj.size();
-  DeltaCode delta;
+  VLI_eliasDelta delta;
   BitString tmp;
   delta.EncodeInt(num_v, &tmp);
   result->AppendBitString(tmp);
@@ -152,21 +118,21 @@ void BacklinksCompression
     delta.EncodeInt(order[i], &tmp);
     result->AppendBitString(tmp);
   }
-  CompressVertexes(adj, result);
+  CompressVertexes(adj, encoding, result);
 }
 
 void BacklinksCompression
 ::Develop(const BitString &code, std::vector<std::pair<int, int> > *edges) {
-  DeltaCode delta;
+  VLI_eliasDelta delta;
   uint64_t cur = 0;
-  int num_v = delta.DecodeNextInt(code, &cur);
+  int num_v = delta.DecodeInt(code, &cur);
   std::vector<int> order(num_v);
   for (int i = 0; i < num_v; ++i) {
-    order[delta.DecodeNextInt(code, &cur)] = i;
+    order[delta.DecodeInt(code, &cur)] = i;
   }
   std::vector<std::vector<int> > adj(num_v);
   for (int i = 0; i < num_v; ++i) {
-    int j = i - delta.DecodeNextInt(code, &cur);
+    int j = i - delta.DecodeInt(code, &cur);
     if (code.GetBit(cur++)) adj[i].push_back(i);
     // copying
     if (i != j) {
@@ -178,13 +144,13 @@ void BacklinksCompression
       }
     }
     // residual
-    int num_residual = delta.DecodeNextInt(code, &cur);
+    int num_residual = delta.DecodeInt(code, &cur);
     if (num_residual != 0) {
       int sign = (code.GetBit(cur++) ? 1 : -1);
-      int now = i + delta.DecodeNextInt(code, &cur) * sign;
+      int now = i + delta.DecodeInt(code, &cur) * sign;
       adj[i].push_back(now);
       for (int j = 1; j < num_residual; ++j) {
-        now += delta.DecodeNextInt(code, &cur);
+        now += delta.DecodeInt(code, &cur);
         adj[i].push_back(now);
       }
     }
@@ -250,9 +216,10 @@ void BacklinksCompression
 
 void BacklinksCompression
 ::CompressVertexes(const std::vector<std::vector<int> > &adj,
+    ENCODING encoding,
                    BitString *result) {
   int num_v = adj.size();
-  DeltaCode delta;
+  VLI_eliasDelta delta;
   BitString tmp;
   for (int i = 0; i < num_v; ++i) {
     BitString best;
@@ -284,6 +251,38 @@ void BacklinksCompression
       ProceedCopying(adj, num_v, i, &cur, &residual);
       // residual
       delta.EncodeInt(residual.size(), &tmp);
+
+      VLI* vli;
+      uint64_t coarse_degree = pow(g_scale, (uint64_t)(log(residual.size())/log(g_scale)));
+      switch(encoding)
+      {
+        case DELTA:
+          vli = new VLI_eliasDelta;
+          break;
+        case FIX6:
+          vli = new VLI_fix6;
+          break;
+        case POISON:
+          if(vli_cache.count(coarse_degree)) 
+          {
+            vli = vli_cache[coarse_degree];
+          }
+          else
+          {
+            cout<<"vli poison : "<<num_v<<" d "<<coarse_degree<<" r "<<g_gamma_r<<endl;
+            vli = new VLI_poison(num_v, coarse_degree, g_gamma_r);
+            vli_cache[coarse_degree]=vli;
+          }
+          break;
+      }
+
+      if(bitlength_acc.count(coarse_degree)==0)
+      {
+        bitlength_acc[coarse_degree]=0;
+        bitlength_count[coarse_degree]=0;
+      }
+
+
       now.AppendBitString(tmp);
       if (residual.size() != 0) {
         if (residual[0] > i) {
@@ -291,11 +290,15 @@ void BacklinksCompression
         } else {
           now.AppendBit(0);
         }
-        delta.EncodeInt(std::abs(residual[0] - i), &tmp);
+        vli->EncodeInt(std::abs(residual[0] - i), &tmp);
         now.AppendBitString(tmp);
+        bitlength_count[coarse_degree]++;
+        bitlength_acc[coarse_degree]+=tmp.get_length();
         for (int k = 1; k < residual.size(); ++k) {
-          delta.EncodeInt(residual[k] - residual[k - 1], &tmp);
+          vli->EncodeInt(residual[k] - residual[k - 1], &tmp);
           now.AppendBitString(tmp);
+          bitlength_count[coarse_degree]++;
+          bitlength_acc[coarse_degree]+=tmp.get_length();
         }
       }
       // reciprocal
@@ -312,4 +315,24 @@ void BacklinksCompression
     }
     result->AppendBitString(best);
   }
+  this->print_stat();
 }
+
+void BacklinksCompression::print_stat()
+{
+  cout<<"print stat bl"<<endl;
+
+  //(*vli_cache.begin()).second->print_name();
+  for(int i=0;i<64;i++)
+  {
+    uint64_t coarse_degree = (uint64_t)pow(g_scale, i);
+    if(vli_cache.count(coarse_degree))
+    {
+      vli_cache[coarse_degree]->print_stat();
+
+      cout<<"\navg encoding, "<<coarse_degree<<" , "<<bitlength_acc[coarse_degree]/(double)bitlength_count[coarse_degree]<<" / "<<bitlength_count[coarse_degree]<<endl<<endl<<endl;
+
+    }
+  }
+}
+

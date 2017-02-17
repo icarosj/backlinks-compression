@@ -34,32 +34,28 @@
 #include <algorithm>
 #include <vector>
 #include <cstdio>
+#include "p_assert.h"
+#include "vli.h"
+#include "fix6.h"
+#include "poison.h"
+#include "eliasDelta.h"
+#include "bitstring.h"
 
 const int kWINDOW_WIDTH = 10;
 enum Ordering { BFS, NONE };
 const Ordering kORDERING = BFS;
 
-//
-// BitString
-//
-class BitString {
- public:
-  BitString() : data_(0), length_(0) {}
-  inline void Init(uint64_t length);
-  inline void AppendBit(uint64_t val);
-  inline void AppendBitString(const BitString &bitstr);
-  inline void SetBit(uint64_t pos, uint64_t val);
-  inline int GetBit(uint64_t pos) const;
-  inline uint64_t get_length() const { return length_;}
-  inline void Print() const;
-  bool Input(const char *filename);
-  bool Output(const char *filename);
- private:
-  static const int kBITMASK63 = (1 << 6) - 1;
-  std::vector<uint64_t> data_;
-  uint64_t length_;
-};
 
+extern  float g_scale;
+extern  float g_gamma_r;
+extern  float g_gamma_meanmod;
+
+enum ENCODING
+{
+  DELTA,
+  FIX6,
+  POISON
+};
 //
 // delta-code (integer encoding)
 //
@@ -77,12 +73,17 @@ class DeltaCode {
 // BacklinksCompression
 //
 class BacklinksCompression {
+
+  unordered_map<uint64_t,VLI*> vli_cache;
+  unordered_map<uint64_t,uint64_t> bitlength_count;
+  unordered_map<uint64_t,uint64_t> bitlength_acc;
  public:
   void TransformToAdj(const std::vector<std::pair<int, int> > &edges,
                       bool directed, std::vector<std::vector<int> > *adj);
   void TransformToEdge(const std::vector<std::vector<int> > &adj,
                         std::vector<std::pair<int, int> > *edges);
   void Compress(std::vector<std::pair<int, int> > edges,
+      ENCODING encoding,
                 BitString *result);
   void Develop(const BitString &code,
                std::vector<std::pair<int, int> > *edges);
@@ -96,51 +97,10 @@ class BacklinksCompression {
   inline void ProceedCopying(const std::vector<std::vector<int> > &adj, int val,
                              int now, int *cur, std::vector<int> *residual);
   void CompressVertexes(const std::vector<std::vector<int> > &adj,
+      ENCODING encoding,
                         BitString *result);
+  void print_stat();
 };
-
-
-//
-// BitString
-//
-inline void BitString::Init(uint64_t length) {
-  data_.clear();
-  data_.resize((length + 63) >> 6, 0);
-  length_ = length;
-}
-
-inline void BitString::AppendBit(uint64_t val) {
-  uint64_t index = length_ >> 6;
-  uint64_t bit_pos = length_ & kBITMASK63;
-  if (!bit_pos) {
-    data_.push_back(val);
-  } else {
-    data_[index] |= val << bit_pos;
-  }
-  ++length_;
-}
-
-inline void BitString::AppendBitString(const BitString &bitstr) {
-  for (uint64_t i = 0; i < bitstr.get_length(); ++i) {
-    AppendBit(bitstr.GetBit(i));
-  }
-}
-
-inline void BitString::SetBit(uint64_t pos, uint64_t val) {
-  uint64_t index = pos >> 6;
-  uint64_t bit_pos = pos & kBITMASK63;
-  data_[index] ^= ((data_[index] >> bit_pos & 1) ^ val) << bit_pos;
-}
-
-inline int BitString::GetBit(uint64_t pos) const {
-  uint64_t index = pos >> 6;
-  uint64_t bit_pos = pos & kBITMASK63;
-  return (data_[index] >> bit_pos & 1);
-}
-
-inline void BitString::Print() const {
-  for (uint64_t i = 0; i < length_; ++i) std::printf("%d", GetBit(i));
-}
 
 //
 // DeltaCode
